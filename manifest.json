@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "Markdown Review Overlay",
+  "version": "0.1.0",
+  "description": "Add modern inline markdown review actions to GitHub and GitHub Enterprise PR rich diff views without any external server.",
+  "action": {
+    "default_title": "Markdown Review Overlay",
+    "default_popup": "popup.html"
+  },
+  "host_permissions": [
+    "https://github.com/*",
+    "https://*/*",
+    "http://*/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://github.com/*/pull/*",
+        "https://*/*/pull/*",
+        "http://*/*/pull/*"
+      ],
+      "js": [
+        "src/lib/textMatch.js",
+        "src/lib/responses.js",
+        "src/lib/tableRows.js",
+        "src/lib/codeBlocks.js",
+        "src/lib/lineMap.js",
+        "content.js"
+      ],
+      "css": [
+        "styles.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "page-bridge.js"
+      ],
+      "matches": [
+        "https://github.com/*",
+        "https://*/*",
+        "http://*/*"
+      ]
+    }
+  ]
+}
