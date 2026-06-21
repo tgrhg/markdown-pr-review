@@ -1,8 +1,6 @@
-# Markdown Review Overlay
+# markdown-pr-review
 
-`Markdown Review Overlay` is a `Manifest V3` Chrome extension for reviewing Markdown in pull request rich diff views on `GitHub` and `GitHub Enterprise`.
-
-It adds a modern inline comment action to rendered Markdown blocks on the PR `Files changed` tab and posts the review comment back to the current host using the browser's existing authenticated session.
+Markdown ファイルを PR で見やすくし、`GitHub` と `GitHub Enterprise` の rich diff 上からそのままレビューコメントできる `Manifest V3` Chrome Extension です。
 
 ## Documents
 
@@ -23,15 +21,14 @@ It adds a modern inline comment action to rendered Markdown blocks on the PR `Fi
 - Supports Markdown-like file extensions: `.md`, `.markdown`, `.mdown`, `.mkdn`, `.mdx`
 - Adds inline comment entry points to headings, paragraphs, list items, blockquotes, code blocks, and table rows
 - Shows a lightweight host-local HUD with mapped-block and rich-diff status
-- Shows per-file badges to indicate whether a Markdown file is ready for rendered commenting
-- Maps rendered blocks back to diff lines by matching rendered text against the PR unified diff
+- Renders existing review threads inline near the mapped rich diff block
+- Maps rendered blocks back to diff lines by matching rendered text against the raw markdown source and route data
 - Posts comments through the current host's internal review-comment endpoint with same-origin authenticated requests
 
 ## Limitations
 
-- This version focuses on creating comments; it does not yet render existing review threads inline
+- Matching is still best-effort for complex HTML-heavy markdown or diagrams
 - If GitHub rejects a line outside the visible diff hunk, adjust the suggested line manually in the composer
-- Matching is best-effort for complex HTML-heavy markdown or diagrams
 - The extension intentionally does not send data to any third-party service
 
 ## Install
@@ -41,13 +38,14 @@ It adds a modern inline comment action to rendered Markdown blocks on the PR `Fi
 3. Click `Load unpacked`
 4. Select this folder
 5. Open a PR `Files changed` page on GitHub or GitHub Enterprise
-6. Switch a Markdown file to rich diff and hover a rendered block
+6. Switch a Markdown file to rich diff and use `Reload / Rescan` if needed
 
 ## Files
 
 - `manifest.json`: extension manifest
-- `content.js`: PR detection, diff parsing, line mapping, and comment posting
-- `styles.css`: injected modern UI styles
+- `content.js`: PR detection, route-data fetch, line mapping, thread rendering, and comment posting
+- `page-bridge.js`: page-context same-origin fetch bridge
+- `styles.css`: injected modern UI styles with light/dark support
 - `popup.html`, `popup.css`: compact extension info panel
 - `docs/design.md`: master design document
 - `docs/manual.md`: operator and user manual
