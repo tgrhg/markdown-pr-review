@@ -64,11 +64,14 @@
       createdAt: c.createdAt || c.publishedAt || c.created_at || new Date().toISOString(),
       htmlUrl: c.url || c.htmlUrl || c.html_url || "",
       threadId: thread.id,
+      threadNodeId: thread.id || null,
       isResolved: !!thread.isResolved,
       isOutdated: !!(thread.isOutdated || thread.outdated),
       viewerCanReply: thread.viewerCanReply !== false,
       viewerCanResolve: thread.viewerCanResolve !== false,
       headDbId,
+      commentNodeId: c.id || c.node_id || null,
+      viewerCanDelete: c.viewerCanDelete === true,
       dbId: (c.databaseId != null ? c.databaseId : (c.database_id != null ? c.database_id : (c.id != null ? c.id : null))),
       isHead: idx === 0
     }));

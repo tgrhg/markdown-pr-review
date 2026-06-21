@@ -36,6 +36,7 @@
   let pageFetchSequence = 0;
   let reinitTimer = null;
   let runtimeError = "";
+  let viewerLogin = "";
 
   function safeEscapeHtml(value) {
     if (typeof escapeHtml === "function") return escapeHtml(value);
@@ -75,6 +76,14 @@
       pullNumber: parseInt(match[3], 10),
       origin: window.location.origin
     };
+  }
+
+  function detectViewerLogin() {
+    const meta = document.querySelector('meta[name="user-login"]');
+    if (meta?.content) return meta.content.trim();
+    const bodyLogin = document.body?.getAttribute("data-login");
+    if (bodyLogin) return bodyLogin.trim();
+    return "";
   }
 
   function ensurePageBridge() {
@@ -176,6 +185,44 @@
     pathDigestMap = new Map();
     rawSourceCache = new Map();
     existingComments = [];
+  }
+
+  async function postJSON(url, body) {
+    const response = await pageFetch(url, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "X-Requested-With": "XMLHttpRequest",
+        "GitHub-Verified-Fetch": "true"
+      },
+      body: JSON.stringify(body)
+    });
+
+    try {
+      return JSON.parse(response.text);
+    } catch {
+      return null;
+    }
+  }
+
+  async function postGraphQL(query, variables) {
+    const urls = [`${prInfo.origin}/graphql`, `${prInfo.origin}/api/graphql`];
+    let lastError = null;
+
+    for (const url of urls) {
+      try {
+        const data = await postJSON(url, { query, variables });
+        if (data?.errors?.length) {
+          throw new Error(data.errors.map((e) => e.message).join(" | "));
+        }
+        if (data?.data) return data.data;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    throw lastError || new Error("GraphQL request failed.");
   }
 
   function getFileContainers() {
@@ -464,6 +511,7 @@
     const comments = [];
 
     Object.entries(threads).forEach(([threadId, thread]) => {
+      if (thread?.isResolved) return;
       const anchor = markerMap.get(String(threadId));
       if (!anchor) return;
       const rawComments = thread?.commentsData?.comments || thread?.comments || [];
@@ -478,8 +526,13 @@
           createdAt: c.createdAt || c.created_at || new Date().toISOString(),
           htmlUrl: c.url || c.htmlUrl || c.html_url || "",
           threadId,
+          threadNodeId: thread?.id || String(threadId),
           isResolved: !!thread?.isResolved,
           isOutdated: !!(thread?.isOutdated || thread?.outdated),
+          viewerCanReply: thread?.viewerCanReply !== false,
+          viewerCanResolve: thread?.viewerCanResolve !== false,
+          viewerCanDelete: c?.viewerCanDelete === true,
+          commentNodeId: c?.id || c?.node_id || null,
           dbId: c.databaseId ?? c.database_id ?? c.id ?? null,
           headDbId: rawComments[0]?.databaseId ?? rawComments[0]?.database_id ?? rawComments[0]?.id ?? null,
           isHead: idx === 0
@@ -509,11 +562,168 @@
     return exact || best;
   }
 
+  function upsertThreadComments(nextComments) {
+    if (!nextComments.length) return;
+    const threadId = String(nextComments[0].threadId || "");
+    existingComments = existingComments.filter((comment) => String(comment.threadId || "") !== threadId);
+    existingComments.push(...nextComments.filter((comment) => !comment.isResolved));
+  }
+
+  function removeCommentLocally(commentNodeId) {
+    existingComments = existingComments.filter((comment) => comment.commentNodeId !== commentNodeId);
+  }
+
+  function resolveThreadLocally(threadId) {
+    existingComments = existingComments.filter((comment) => String(comment.threadId || "") !== String(threadId || ""));
+  }
+
+  function buildOptimisticComment(path, line, body) {
+    const threadId = `local-${Date.now()}`;
+    return [{
+      path,
+      line,
+      startLine: null,
+      body,
+      bodyHTML: "",
+      user: viewerLogin || "you",
+      createdAt: new Date().toISOString(),
+      htmlUrl: "",
+      threadId,
+      threadNodeId: threadId,
+      isResolved: false,
+      isOutdated: false,
+      viewerCanReply: true,
+      viewerCanResolve: true,
+      viewerCanDelete: true,
+      commentNodeId: null,
+      dbId: null,
+      headDbId: null,
+      isHead: true
+    }];
+  }
+
+  function showThreadError(threadEl, message) {
+    const errorEl = threadEl.querySelector(".grdc-thread-error");
+    if (!errorEl) return;
+    errorEl.hidden = false;
+    errorEl.textContent = `✗ ${message}`;
+  }
+
+  function clearThreadError(threadEl) {
+    const errorEl = threadEl.querySelector(".grdc-thread-error");
+    if (!errorEl) return;
+    errorEl.hidden = true;
+    errorEl.textContent = "";
+  }
+
+  function setButtonBusy(button, busyLabel) {
+    const original = button.textContent;
+    button.disabled = true;
+    button.textContent = busyLabel;
+    return () => {
+      button.disabled = false;
+      button.textContent = original;
+    };
+  }
+
+  async function resolveReviewThread(threadNodeId) {
+    return postGraphQL(
+      `mutation ResolveReviewThread($threadId: ID!) {
+        resolveReviewThread(input: { threadId: $threadId }) {
+          thread {
+            id
+            isResolved
+          }
+        }
+      }`,
+      { threadId: threadNodeId }
+    );
+  }
+
+  async function deleteReviewComment(commentNodeId) {
+    return postGraphQL(
+      `mutation DeletePullRequestReviewComment($id: ID!) {
+        deletePullRequestReviewComment(input: { id: $id }) {
+          clientMutationId
+        }
+      }`,
+      { id: commentNodeId }
+    );
+  }
+
+  async function replyToReviewComment(commentNodeId, body) {
+    return postGraphQL(
+      `mutation AddPullRequestReviewComment($inReplyTo: ID!, $body: String!) {
+        addPullRequestReviewComment(input: { inReplyTo: $inReplyTo, body: $body }) {
+          comment {
+            id
+            databaseId
+            body
+            bodyHTML
+            createdAt
+            url
+            author {
+              login
+            }
+            pullRequestReviewThread {
+              id
+              isResolved
+              isOutdated
+              viewerCanReply
+              viewerCanResolve
+              comments(first: 100) {
+                nodes {
+                  id
+                  databaseId
+                  body
+                  bodyHTML
+                  createdAt
+                  url
+                  viewerCanDelete
+                  author {
+                    login
+                  }
+                }
+              }
+            }
+          }
+        }
+      }`,
+      { inReplyTo: commentNodeId, body }
+    );
+  }
+
+  function threadGraphqlToComments(thread, anchorComment) {
+    const rawComments = thread?.comments?.nodes || [];
+    return rawComments.map((comment, idx) => ({
+      path: anchorComment.path,
+      line: anchorComment.line,
+      startLine: anchorComment.startLine,
+      body: comment.body || "",
+      bodyHTML: comment.bodyHTML || "",
+      user: comment?.author?.login || "unknown",
+      createdAt: comment.createdAt || new Date().toISOString(),
+      htmlUrl: comment.url || "",
+      threadId: thread.id,
+      threadNodeId: thread.id,
+      isResolved: !!thread.isResolved,
+      isOutdated: !!thread.isOutdated,
+      viewerCanReply: thread.viewerCanReply !== false,
+      viewerCanResolve: thread.viewerCanResolve !== false,
+      viewerCanDelete: comment.viewerCanDelete === true,
+      commentNodeId: comment.id || null,
+      dbId: comment.databaseId ?? null,
+      headDbId: rawComments[0]?.databaseId ?? null,
+      isHead: idx === 0
+    }));
+  }
+
   function createThreadElement(headComments) {
     const head = headComments[0];
     const wrap = document.createElement("div");
     wrap.className = "grdc-existing-thread";
     wrap.dataset.grdcAnchor = buildAnchorKey(head);
+    wrap.dataset.threadId = String(head.threadId || "");
     wrap.innerHTML = `
       <button type="button" class="grdc-thread-badge">💬 ${headComments.length} comment${headComments.length > 1 ? "s" : ""}</button>
       <div class="grdc-thread-body" style="display:none;"></div>
@@ -521,15 +731,41 @@
     const badge = wrap.querySelector(".grdc-thread-badge");
     const body = wrap.querySelector(".grdc-thread-body");
 
-    body.innerHTML = headComments.map((comment) => `
-      <div class="grdc-thread-comment">
-        <div class="grdc-thread-meta">
-          <strong>${escapeHtml(comment.user)}</strong>
-          <span>${escapeHtml(formatTimeAgo(comment.createdAt))}</span>
+    const commentsHtml = headComments.map((comment) => {
+      const canDelete = comment.viewerCanDelete || (viewerLogin && comment.user === viewerLogin);
+      return `
+        <div class="grdc-thread-comment" data-comment-id="${safeEscapeHtml(comment.commentNodeId || "")}">
+          <div class="grdc-thread-meta">
+            <strong>${escapeHtml(comment.user)}</strong>
+            <span>${escapeHtml(formatTimeAgo(comment.createdAt))}</span>
+          </div>
+          <div class="grdc-thread-text">${comment.bodyHTML || escapeHtml(comment.body).replace(/\n/g, "<br>")}</div>
+          ${canDelete && comment.commentNodeId ? `
+            <div class="grdc-thread-comment-actions">
+              <button type="button" class="grdc-mini-btn" data-action="delete" data-comment-id="${safeEscapeHtml(comment.commentNodeId)}">Delete</button>
+            </div>
+          ` : ""}
         </div>
-        <div class="grdc-thread-text">${comment.bodyHTML || escapeHtml(comment.body).replace(/\n/g, "<br>")}</div>
+      `;
+    }).join("");
+
+    const openUrl = headComments.find((comment) => comment.htmlUrl)?.htmlUrl || "";
+    body.innerHTML = `
+      ${commentsHtml}
+      <div class="grdc-thread-actions">
+        ${head.viewerCanReply !== false ? '<button type="button" class="grdc-mini-btn" data-action="reply">Reply</button>' : ""}
+        ${head.viewerCanResolve !== false ? '<button type="button" class="grdc-mini-btn" data-action="resolve">Resolve</button>' : ""}
+        ${openUrl ? `<a class="grdc-mini-btn" href="${safeEscapeHtml(openUrl)}" target="_blank" rel="noreferrer">Open</a>` : ""}
       </div>
-    `).join("");
+      <div class="grdc-thread-reply" hidden>
+        <textarea class="grdc-editor-textarea grdc-editor-textarea-inline" rows="4" placeholder="Reply to this thread..."></textarea>
+        <div class="grdc-comment-actions grdc-comment-actions-inline">
+          <button class="grdc-btn grdc-btn-cancel" data-action="cancel-reply">Cancel</button>
+          <button class="grdc-btn grdc-btn-primary" data-action="submit-reply">Reply</button>
+        </div>
+      </div>
+      <div class="grdc-thread-error" hidden></div>
+    `;
 
     badge.addEventListener("click", () => {
       body.style.display = body.style.display === "none" ? "block" : "none";
@@ -537,10 +773,100 @@
     return wrap;
   }
 
+  function bindThreadActions(threadEl, threadComments) {
+    const body = threadEl.querySelector(".grdc-thread-body");
+    if (!body) return;
+    const anchorComment = threadComments[0];
+
+    body.addEventListener("click", async (event) => {
+      const actionEl = event.target.closest("[data-action]");
+      if (!actionEl) return;
+      const action = actionEl.getAttribute("data-action");
+      if (!action) return;
+      clearThreadError(threadEl);
+
+      if (action === "reply") {
+        const replyBox = body.querySelector(".grdc-thread-reply");
+        if (replyBox) {
+          replyBox.hidden = false;
+          replyBox.querySelector("textarea")?.focus();
+        }
+        return;
+      }
+
+      if (action === "cancel-reply") {
+        const replyBox = body.querySelector(".grdc-thread-reply");
+        if (replyBox) replyBox.hidden = true;
+        return;
+      }
+
+      if (action === "submit-reply") {
+        const replyBox = body.querySelector(".grdc-thread-reply");
+        const textarea = replyBox?.querySelector("textarea");
+        const text = textarea?.value.trim() || "";
+        if (!text) return;
+        if (!anchorComment.commentNodeId) {
+          showThreadError(threadEl, "Missing comment node ID for reply.");
+          return;
+        }
+        const reset = setButtonBusy(actionEl, "Replying...");
+        try {
+          const data = await replyToReviewComment(anchorComment.commentNodeId, text);
+          const thread = data?.addPullRequestReviewComment?.comment?.pullRequestReviewThread;
+          if (!thread) throw new Error("Reply succeeded but thread payload was empty.");
+          upsertThreadComments(threadGraphqlToComments(thread, anchorComment));
+          renderExistingComments();
+          scheduleReinit(1200, true);
+        } catch (error) {
+          showThreadError(threadEl, error.message || "Reply failed.");
+          reset();
+        }
+        return;
+      }
+
+      if (action === "resolve") {
+        if (!anchorComment.threadNodeId) {
+          showThreadError(threadEl, "Missing thread node ID for resolve.");
+          return;
+        }
+        const reset = setButtonBusy(actionEl, "Resolving...");
+        try {
+          await resolveReviewThread(anchorComment.threadNodeId);
+          resolveThreadLocally(anchorComment.threadId);
+          renderExistingComments();
+          scheduleReinit(1200, true);
+        } catch (error) {
+          showThreadError(threadEl, error.message || "Resolve failed.");
+          reset();
+        }
+        return;
+      }
+
+      if (action === "delete") {
+        const commentNodeId = actionEl.getAttribute("data-comment-id");
+        if (!commentNodeId) {
+          showThreadError(threadEl, "Missing comment node ID for delete.");
+          return;
+        }
+        const reset = setButtonBusy(actionEl, "Deleting...");
+        try {
+          await deleteReviewComment(commentNodeId);
+          removeCommentLocally(commentNodeId);
+          renderExistingComments();
+          scheduleReinit(1200, true);
+        } catch (error) {
+          showThreadError(threadEl, error.message || "Delete failed.");
+          reset();
+        }
+      }
+    });
+  }
+
   function renderThreadOnElement(element, threadComments) {
     if (!threadComments.length) return;
     const head = threadComments[0];
     const threadEl = createThreadElement(threadComments);
+    bindThreadActions(threadEl, threadComments);
     const anchor = createInsertAnchor(element);
     const anchorLine = head.startLine != null ? head.startLine : head.line;
 
@@ -695,9 +1021,11 @@
       const result = await postReviewComment(info.path, lineToPost, body, {});
       if (result.ok) {
         const newComments = threadResponseToComments(result.data, info.path, lineToPost, null);
-        if (newComments.length) renderThreadOnElement(element, newComments);
+        const nextComments = newComments.length ? newComments : buildOptimisticComment(info.path, lineToPost, body);
+        upsertThreadComments(nextComments);
         box.remove();
-        scheduleReinit();
+        renderExistingComments();
+        scheduleReinit(1200, true);
       } else {
         submitBtn.disabled = false;
         submitBtn.textContent = "Comment";
@@ -719,12 +1047,13 @@
     textarea.focus();
   }
 
-  function scheduleReinit() {
+  function scheduleReinit(delay = 250, shouldInvalidate = false) {
     if (reinitTimer) return;
     reinitTimer = setTimeout(() => {
       reinitTimer = null;
+      if (shouldInvalidate) invalidateCaches();
       init();
-    }, 250);
+    }, delay);
   }
 
   async function init() {
@@ -732,6 +1061,7 @@
     prInfo = parsePRUrl();
     if (!prInfo) return;
     runtimeError = "";
+    viewerLogin = detectViewerLogin();
 
     const missingHelpers = Object.entries(requiredHelpers)
       .filter(([, value]) => typeof value !== "function")

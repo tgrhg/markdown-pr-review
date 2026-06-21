@@ -182,6 +182,22 @@ html[data-color-mode="dark"] {
   background: var(--mro-thread-bg);
 }
 
+.grdc-thread-comment-actions,
+.grdc-thread-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.grdc-thread-comment-actions {
+  margin-top: 0.7rem;
+}
+
+.grdc-thread-actions {
+  margin-top: 0.9rem;
+}
+
 .grdc-thread-meta {
   display: flex;
   align-items: baseline;
@@ -201,6 +217,33 @@ html[data-color-mode="dark"] {
   color: var(--mro-text);
   font: 500 13px/1.6 var(--mro-font);
   word-break: break-word;
+}
+
+.grdc-mini-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2rem;
+  padding: 0.45rem 0.78rem;
+  border: 1px solid var(--mro-border);
+  border-radius: 999px;
+  background: var(--mro-panel-muted);
+  color: var(--mro-text-muted);
+  font: 700 11px/1 var(--mro-font);
+  letter-spacing: 0.03em;
+  text-decoration: none;
+  cursor: pointer;
+  transition:
+    transform var(--mro-ease),
+    border-color var(--mro-ease),
+    background var(--mro-ease),
+    color var(--mro-ease);
+}
+
+.grdc-mini-btn:hover {
+  transform: translateY(-1px);
+  border-color: var(--mro-border-strong);
+  color: var(--mro-text);
 }
 
 .grdc-line-info {
@@ -243,6 +286,11 @@ html[data-color-mode="dark"] {
   resize: vertical;
 }
 
+.grdc-editor-textarea-inline {
+  min-height: 5.5rem;
+  margin: 0.9rem 0 0;
+}
+
 .grdc-line-input:focus,
 .grdc-editor-textarea:focus {
   border-color: rgba(37, 99, 235, 0.42);
@@ -260,6 +308,10 @@ html[data-color-mode="dark"] {
   justify-content: flex-end;
   gap: 0.7rem;
   padding: 0.9rem 1rem 1rem;
+}
+
+.grdc-comment-actions-inline {
+  padding: 0.8rem 0 0;
 }
 
 .grdc-btn,
@@ -314,6 +366,17 @@ html[data-color-mode="dark"] {
 .grdc-error {
   margin: 0 1rem 1rem;
   padding: 0.85rem 0.95rem;
+  border: 1px solid rgba(239, 68, 68, 0.26);
+  border-radius: 14px;
+  background: var(--mro-danger-bg);
+  color: var(--mro-danger);
+  font: 700 12px/1.45 var(--mro-font);
+  word-break: break-word;
+}
+
+.grdc-thread-error {
+  margin-top: 0.8rem;
+  padding: 0.78rem 0.88rem;
   border: 1px solid rgba(239, 68, 68, 0.26);
   border-radius: 14px;
   background: var(--mro-danger-bg);
