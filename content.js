@@ -37,6 +37,7 @@
   let reinitTimer = null;
   let runtimeError = "";
   let viewerLogin = "";
+  const movedNativeThreads = new Map();
 
   function safeEscapeHtml(value) {
     if (typeof escapeHtml === "function") return escapeHtml(value);
@@ -86,6 +87,19 @@
     return "";
   }
 
+  function detectCsrfToken() {
+    const meta = document.querySelector('meta[name="csrf-token"]');
+    return meta?.content?.trim() || "";
+  }
+
+  function getApiBaseUrls() {
+    if (!prInfo?.origin) return [];
+    if (prInfo.origin === "https://github.com") {
+      return ["https://github.com/api/v3", "https://api.github.com"];
+    }
+    return [`${prInfo.origin}/api/v3`];
+  }
+
   function ensurePageBridge() {
     if (pageBridgeReady) return Promise.resolve();
     if (pageBridgePromise) return pageBridgePromise;
@@ -130,7 +144,7 @@
         }
         window.clearTimeout(timeoutId);
         window.removeEventListener("message", onMessage);
-        if (!data.ok) {
+        if (!data.ok && !options?.allowHttpError) {
           reject(new Error(data.error || `HTTP ${data.status} ${data.statusText}`.trim()));
           return;
         }
@@ -188,22 +202,163 @@
   }
 
   async function postJSON(url, body) {
+    const csrfToken = detectCsrfToken();
     const response = await pageFetch(url, {
       method: "POST",
+      allowHttpError: true,
       headers: {
         Accept: "application/json",
         "Content-Type": "application/json",
         "X-Requested-With": "XMLHttpRequest",
-        "GitHub-Verified-Fetch": "true"
+        "GitHub-Verified-Fetch": "true",
+        ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {})
       },
       body: JSON.stringify(body)
     });
 
+    let parsed = null;
     try {
-      return JSON.parse(response.text);
+      parsed = JSON.parse(response.text);
     } catch {
-      return null;
+      parsed = null;
     }
+
+    if (!response.ok) {
+      const errorMessage =
+        parsed?.errors?.map((e) => e.message).join(" | ") ||
+        parsed?.message ||
+        response.text ||
+        `HTTP ${response.status} ${response.statusText}`;
+      throw new Error(errorMessage);
+    }
+
+    return parsed;
+  }
+
+  async function requestJSON(url, options) {
+    const csrfToken = detectCsrfToken();
+    const requestUrl = new URL(url, window.location.origin);
+    const method = options?.method || "GET";
+    const headers = {
+      Accept: "application/vnd.github+json",
+      "Content-Type": "application/json",
+      "X-GitHub-Api-Version": "2026-03-10",
+      "X-Requested-With": "XMLHttpRequest",
+      ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
+      ...(options?.headers || {})
+    };
+    const body = typeof options?.body === "string" ? options.body : (options?.body ? JSON.stringify(options.body) : undefined);
+
+    let response;
+    if (requestUrl.origin === window.location.origin) {
+      response = await pageFetch(requestUrl.toString(), {
+        method,
+        allowHttpError: true,
+        headers,
+        body
+      });
+    } else {
+      let raw;
+      try {
+        raw = await fetch(requestUrl.toString(), {
+          method,
+          headers,
+          body,
+          credentials: "include"
+        });
+      } catch (error) {
+        throw new Error(error?.message || "Cross-origin fetch failed.");
+      }
+      response = {
+        ok: raw.ok,
+        status: raw.status,
+        statusText: raw.statusText,
+        text: await raw.text()
+      };
+    }
+
+    let parsed = null;
+    try {
+      parsed = response.text ? JSON.parse(response.text) : null;
+    } catch {
+      parsed = null;
+    }
+
+    if (!response.ok) {
+      const errorMessage =
+        parsed?.errors?.map((e) => e.message).join(" | ") ||
+        parsed?.message ||
+        response.text ||
+        `HTTP ${response.status} ${response.statusText}`;
+      throw new Error(errorMessage);
+    }
+
+    return parsed;
+  }
+
+  async function requestJSONViaBackground(url, options) {
+    const body = typeof options?.body === "string" ? options.body : (options?.body ? JSON.stringify(options.body) : undefined);
+    const response = await new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(
+        {
+          type: "MRO_BACKGROUND_FETCH",
+          url,
+          method: options?.method || "GET",
+          headers: options?.headers || {
+            Accept: "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "X-GitHub-Api-Version": "2026-03-10"
+          },
+          body
+        },
+        (result) => {
+          const lastError = chrome.runtime.lastError;
+          if (lastError) {
+            reject(new Error(lastError.message));
+            return;
+          }
+          resolve(result);
+        }
+      );
+    });
+
+    let parsed = null;
+    try {
+      parsed = response?.text ? JSON.parse(response.text) : null;
+    } catch {
+      parsed = null;
+    }
+
+    if (!response?.ok) {
+      const errorMessage =
+        parsed?.errors?.map((e) => e.message).join(" | ") ||
+        parsed?.message ||
+        response?.error ||
+        response?.text ||
+        `HTTP ${response?.status || 0} ${response?.statusText || "FETCH_ERROR"}`;
+      throw new Error(errorMessage);
+    }
+
+    return parsed;
+  }
+
+  async function requestFromApiBases(path, options) {
+    const bases = getApiBaseUrls();
+    let lastError = null;
+
+    for (const base of bases) {
+      try {
+        const url = `${base}${path}`;
+        if (new URL(url, window.location.origin).origin === window.location.origin) {
+          return await requestJSON(url, options);
+        }
+        return await requestJSONViaBackground(url, options);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    throw lastError || new Error("API request failed.");
   }
 
   async function postGraphQL(query, variables) {
@@ -213,16 +368,58 @@
     for (const url of urls) {
       try {
         const data = await postJSON(url, { query, variables });
-        if (data?.errors?.length) {
+        if (!data) {
+          throw new Error("GraphQL response was empty.");
+        }
+        if (data.errors?.length) {
           throw new Error(data.errors.map((e) => e.message).join(" | "));
         }
-        if (data?.data) return data.data;
+        if (data.data) return data.data;
       } catch (error) {
         lastError = error;
       }
     }
 
     throw lastError || new Error("GraphQL request failed.");
+  }
+
+  async function pageDataPost(candidates, label) {
+    if (!prInfo) return { ok: false, error: "No PR info" };
+    const base = `${prInfo.origin}/${prInfo.owner}/${prInfo.repo}/pull/${prInfo.pullNumber}/page_data`;
+    let lastError = "";
+
+    for (const candidate of candidates) {
+      try {
+        const response = await pageFetch(`${base}/${candidate.path}`, {
+          method: "POST",
+          allowHttpError: true,
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            "X-Requested-With": "XMLHttpRequest",
+            "GitHub-Verified-Fetch": "true"
+          },
+          body: JSON.stringify(candidate.body || {})
+        });
+
+        if (response.ok) {
+          let data = null;
+          try { data = JSON.parse(response.text); } catch {}
+          return { ok: true, data, raw: response.text || "" };
+        }
+
+        lastError = `HTTP ${response.status}: ${(response.text || "").slice(0, 200)}`;
+        console.log(`[MRO] ${label} -> ${candidate.path} failed:`, lastError);
+        if (response.status !== 404 && response.status !== 405) {
+          continue;
+        }
+      } catch (error) {
+        lastError = error.message || String(error);
+        console.log(`[MRO] ${label} -> ${candidate.path} threw:`, lastError);
+      }
+    }
+
+    return { ok: false, error: lastError || "All endpoint candidates failed." };
   }
 
   function getFileContainers() {
@@ -455,7 +652,7 @@
       ? "Rich Diff を開いたあとに Reload / Rescan を押してください。"
       : commentableBlocks === 0
         ? "Rich Diff は読めていますが、行マッピングがまだ作れていません。対象 markdown の raw 取得を再試行してください。"
-        : "既存スレッドはライン順に配置し、新規コメントは同じ位置へ挿入されます。");
+        : "既存スレッドは native thread を優先して移設し、見つからない場合だけ簡易表示へフォールバックします。");
     const hud = document.createElement("aside");
     hud.className = `${EXT}-hud`;
     hud.innerHTML = `
@@ -570,7 +767,7 @@
   }
 
   function removeCommentLocally(commentNodeId) {
-    existingComments = existingComments.filter((comment) => comment.commentNodeId !== commentNodeId);
+    existingComments = existingComments.filter((comment) => String(comment.dbId ?? "") !== String(commentNodeId));
   }
 
   function resolveThreadLocally(threadId) {
@@ -602,6 +799,149 @@
     }];
   }
 
+  function restoreMovedNativeThreads() {
+    movedNativeThreads.forEach((state, element) => {
+      if (!state?.placeholder?.parentNode) return;
+      state.placeholder.parentNode.insertBefore(element, state.placeholder);
+      state.placeholder.remove();
+      element.classList.remove("grdc-native-thread");
+    });
+    movedNativeThreads.clear();
+  }
+
+  function closestNativeThreadHost(node) {
+    if (!(node instanceof Element)) return null;
+    let cur = node;
+    while (cur && cur !== document.body) {
+      if (isNativeThreadContainer(cur)) return cur;
+      cur = cur.parentElement;
+    }
+    return null;
+  }
+
+  function isNativeThreadContainer(element) {
+    if (!(element instanceof Element)) return false;
+    const selectorMatch = element.matches(
+      ".js-resolvable-thread, [data-testid='review-thread'], .review-thread, .js-inline-comments-container, .js-comment-holder, .TimelineItem, tr, details, .js-minimizable-comment-group, .review-comment, [id^='pullrequestreview-']"
+    );
+    if (!selectorMatch) return false;
+
+    const hasDiscussionAnchor =
+      !!element.querySelector("[id^='discussion_r'], a[href*='#discussion_r']") ||
+      /^discussion_r\d+$/.test(element.id || "");
+
+    const hasReviewUi =
+      !!element.querySelector("textarea, button, summary, form") &&
+      /(reply|resolve|resolved|delete|outdated|conversation)/i.test(element.textContent || "");
+
+    const hasCommentShape =
+      !!element.querySelector(".comment, .timeline-comment, .review-comment, [data-comment-id], [data-review-comment-id]");
+
+    return hasDiscussionAnchor || (hasReviewUi && hasCommentShape);
+  }
+
+  function findNativeThreadByDiscussionId(id) {
+    const direct = document.getElementById(`discussion_r${id}`);
+    const directHost = closestNativeThreadHost(direct);
+    if (directHost) return directHost;
+
+    const anchorLink = document.querySelector(`a[href*="#discussion_r${id}"]`);
+    const linkHost = closestNativeThreadHost(anchorLink);
+    if (linkHost) return linkHost;
+
+    const anyId = document.querySelector(`[id="discussion_r${id}"]`);
+    const anyHost = closestNativeThreadHost(anyId);
+    if (anyHost) return anyHost;
+
+    return null;
+  }
+
+  function findNativeThreadElement(threadComments) {
+    const ids = Array.from(new Set(
+      threadComments.flatMap((comment) => [comment.dbId, comment.headDbId]).filter(Boolean).map(String)
+    ));
+
+    for (const id of ids) {
+      const discussionHost = findNativeThreadByDiscussionId(id);
+      if (discussionHost) return discussionHost;
+
+      const attrHost = document.querySelector(
+        `[data-comment-id="${id}"], [data-review-comment-id="${id}"], [data-discussion-id="${id}"], [data-id="${id}"]`
+      );
+      const normalizedHost = closestNativeThreadHost(attrHost);
+      if (normalizedHost) return normalizedHost;
+    }
+
+    for (const comment of threadComments) {
+      if (!comment.htmlUrl) continue;
+      const byUrl = document.querySelector(`a[href="${CSS.escape(comment.htmlUrl)}"]`);
+      const host = closestNativeThreadHost(byUrl);
+      if (host) return host;
+    }
+
+    return null;
+  }
+
+  function mountNativeThreadOnElement(element, threadComments) {
+    const nativeThread = findNativeThreadElement(threadComments);
+    if (!nativeThread) return false;
+    if (!movedNativeThreads.has(nativeThread)) {
+      const placeholder = document.createComment("grdc-native-thread-placeholder");
+      nativeThread.parentNode?.insertBefore(placeholder, nativeThread);
+      movedNativeThreads.set(nativeThread, { placeholder });
+    }
+    nativeThread.classList.add("grdc-native-thread");
+    const anchor = createInsertAnchor(element);
+    const anchorLine = threadComments[0].startLine != null ? threadComments[0].startLine : threadComments[0].line;
+
+    let insertBefore = null;
+    let probe = anchor.nextNode();
+    while (probe) {
+      if (probe.classList?.contains("grdc-existing-thread") || probe.classList?.contains("grdc-native-thread")) {
+        const probeLine = parseLineFromAnchor(probe.dataset.grdcAnchor || "");
+        if (probeLine != null && probeLine > anchorLine) {
+          insertBefore = probe;
+          break;
+        }
+      } else if (!probe.classList?.contains("grdc-existing-thread")) {
+        break;
+      }
+      probe = probe.nextElementSibling;
+    }
+
+    nativeThread.dataset.grdcAnchor = buildAnchorKey(threadComments[0]);
+    anchor.insert(nativeThread, insertBefore);
+    return true;
+  }
+
+  function appendReplyLocally(anchorComment, reply) {
+    const threadComments = existingComments.filter((comment) => String(comment.threadId || "") === String(anchorComment.threadId || ""));
+    const head = threadComments[0] || anchorComment;
+    const next = {
+      path: head.path,
+      line: head.line,
+      startLine: head.startLine,
+      body: reply.body || "",
+      bodyHTML: reply.body_html || reply.bodyHTML || "",
+      user: reply?.user?.login || viewerLogin || "you",
+      createdAt: reply.created_at || reply.createdAt || new Date().toISOString(),
+      htmlUrl: reply.html_url || reply.url || "",
+      threadId: head.threadId,
+      threadNodeId: head.threadNodeId,
+      isResolved: false,
+      isOutdated: !!head.isOutdated,
+      viewerCanReply: head.viewerCanReply !== false,
+      viewerCanResolve: head.viewerCanResolve !== false,
+      viewerCanDelete: true,
+      commentNodeId: null,
+      dbId: reply.id ?? null,
+      headDbId: head.headDbId ?? head.dbId ?? null,
+      isHead: false
+    };
+
+    existingComments.push(next);
+  }
+
   function showThreadError(threadEl, message) {
     const errorEl = threadEl.querySelector(".grdc-thread-error");
     if (!errorEl) return;
@@ -627,95 +967,58 @@
   }
 
   async function resolveReviewThread(threadNodeId) {
-    return postGraphQL(
-      `mutation ResolveReviewThread($threadId: ID!) {
-        resolveReviewThread(input: { threadId: $threadId }) {
-          thread {
-            id
-            isResolved
-          }
-        }
-      }`,
-      { threadId: threadNodeId }
+    return pageDataPost(
+      [{ path: "resolve_thread", body: { threadId: threadNodeId } }],
+      `resolve(thread=${threadNodeId})`
     );
   }
 
   async function deleteReviewComment(commentNodeId) {
-    return postGraphQL(
-      `mutation DeletePullRequestReviewComment($id: ID!) {
-        deletePullRequestReviewComment(input: { id: $id }) {
-          clientMutationId
-        }
-      }`,
-      { id: commentNodeId }
-    );
-  }
-
-  async function replyToReviewComment(commentNodeId, body) {
-    return postGraphQL(
-      `mutation AddPullRequestReviewComment($inReplyTo: ID!, $body: String!) {
-        addPullRequestReviewComment(input: { inReplyTo: $inReplyTo, body: $body }) {
-          comment {
-            id
-            databaseId
-            body
-            bodyHTML
-            createdAt
-            url
-            author {
-              login
-            }
-            pullRequestReviewThread {
-              id
-              isResolved
-              isOutdated
-              viewerCanReply
-              viewerCanResolve
-              comments(first: 100) {
-                nodes {
-                  id
-                  databaseId
-                  body
-                  bodyHTML
-                  createdAt
-                  url
-                  viewerCanDelete
-                  author {
-                    login
-                  }
-                }
-              }
-            }
+    if (!prInfo) return { ok: false, error: "No PR info" };
+    try {
+      const response = await pageFetch(
+        `${prInfo.origin}/${prInfo.owner}/${prInfo.repo}/pull/${prInfo.pullNumber}/page_data/review_comments/${commentNodeId}`,
+        {
+          method: "DELETE",
+          allowHttpError: true,
+          headers: {
+            Accept: "application/json",
+            "X-Requested-With": "XMLHttpRequest",
+            "GitHub-Verified-Fetch": "true"
           }
         }
-      }`,
-      { inReplyTo: commentNodeId, body }
-    );
+      );
+      if (response.ok) return { ok: true };
+      return { ok: false, error: `HTTP ${response.status}: ${(response.text || "").slice(0, 200)}` };
+    } catch (error) {
+      return { ok: false, error: error.message || String(error) };
+    }
   }
 
-  function threadGraphqlToComments(thread, anchorComment) {
-    const rawComments = thread?.comments?.nodes || [];
-    return rawComments.map((comment, idx) => ({
-      path: anchorComment.path,
-      line: anchorComment.line,
-      startLine: anchorComment.startLine,
-      body: comment.body || "",
-      bodyHTML: comment.bodyHTML || "",
-      user: comment?.author?.login || "unknown",
-      createdAt: comment.createdAt || new Date().toISOString(),
-      htmlUrl: comment.url || "",
-      threadId: thread.id,
-      threadNodeId: thread.id,
-      isResolved: !!thread.isResolved,
-      isOutdated: !!thread.isOutdated,
-      viewerCanReply: thread.viewerCanReply !== false,
-      viewerCanResolve: thread.viewerCanResolve !== false,
-      viewerCanDelete: comment.viewerCanDelete === true,
-      commentNodeId: comment.id || null,
-      dbId: comment.databaseId ?? null,
-      headDbId: rawComments[0]?.databaseId ?? null,
-      isHead: idx === 0
-    }));
+  async function replyToReviewComment(commentId, body) {
+    const oids = discoverCommitOids(document);
+    const headOid = routeData?.comparison?.fullDiff?.headOid ||
+      routeData?.comparison?.headOid ||
+      oids.head;
+    const baseOid = routeData?.comparison?.fullDiff?.comparisonStartOid ||
+      routeData?.comparison?.comparisonStartOid ||
+      routeData?.comparison?.fullDiff?.baseOid ||
+      routeData?.comparison?.baseOid ||
+      oids.base;
+
+    return pageDataPost(
+      [{
+        path: "create_review_comment",
+        body: {
+          inReplyTo: commentId,
+          text: body,
+          submitBatch: true,
+          comparisonStartOid: baseOid,
+          comparisonEndOid: headOid
+        }
+      }],
+      `reply(inReplyTo=${commentId})`
+    );
   }
 
   function createThreadElement(headComments) {
@@ -733,16 +1036,17 @@
 
     const commentsHtml = headComments.map((comment) => {
       const canDelete = comment.viewerCanDelete || (viewerLogin && comment.user === viewerLogin);
+      const deleteId = comment.dbId || "";
       return `
-        <div class="grdc-thread-comment" data-comment-id="${safeEscapeHtml(comment.commentNodeId || "")}">
+        <div class="grdc-thread-comment" data-comment-id="${safeEscapeHtml(String(deleteId))}">
           <div class="grdc-thread-meta">
             <strong>${escapeHtml(comment.user)}</strong>
             <span>${escapeHtml(formatTimeAgo(comment.createdAt))}</span>
           </div>
           <div class="grdc-thread-text">${comment.bodyHTML || escapeHtml(comment.body).replace(/\n/g, "<br>")}</div>
-          ${canDelete && comment.commentNodeId ? `
+          ${canDelete && deleteId ? `
             <div class="grdc-thread-comment-actions">
-              <button type="button" class="grdc-mini-btn" data-action="delete" data-comment-id="${safeEscapeHtml(comment.commentNodeId)}">Delete</button>
+              <button type="button" class="grdc-mini-btn" data-action="delete" data-comment-id="${safeEscapeHtml(String(deleteId))}">Delete</button>
             </div>
           ` : ""}
         </div>
@@ -805,16 +1109,18 @@
         const textarea = replyBox?.querySelector("textarea");
         const text = textarea?.value.trim() || "";
         if (!text) return;
-        if (!anchorComment.commentNodeId) {
-          showThreadError(threadEl, "Missing comment node ID for reply.");
+        const replyTargetId = anchorComment.headDbId ?? anchorComment.dbId;
+        if (!replyTargetId) {
+          showThreadError(threadEl, "Missing review comment ID for reply.");
           return;
         }
         const reset = setButtonBusy(actionEl, "Replying...");
         try {
-          const data = await replyToReviewComment(anchorComment.commentNodeId, text);
-          const thread = data?.addPullRequestReviewComment?.comment?.pullRequestReviewThread;
-          if (!thread) throw new Error("Reply succeeded but thread payload was empty.");
-          upsertThreadComments(threadGraphqlToComments(thread, anchorComment));
+          const result = await replyToReviewComment(replyTargetId, text);
+          if (!result.ok) throw new Error(result.error || "Reply failed.");
+          const nextComments = threadResponseToComments(result.data, anchorComment.path, anchorComment.line, anchorComment.startLine);
+          if (nextComments.length) upsertThreadComments(nextComments);
+          else appendReplyLocally(anchorComment, { body: text });
           renderExistingComments();
           scheduleReinit(1200, true);
         } catch (error) {
@@ -831,7 +1137,8 @@
         }
         const reset = setButtonBusy(actionEl, "Resolving...");
         try {
-          await resolveReviewThread(anchorComment.threadNodeId);
+          const result = await resolveReviewThread(anchorComment.threadNodeId);
+          if (!result.ok) throw new Error(result.error || "Resolve failed.");
           resolveThreadLocally(anchorComment.threadId);
           renderExistingComments();
           scheduleReinit(1200, true);
@@ -843,15 +1150,16 @@
       }
 
       if (action === "delete") {
-        const commentNodeId = actionEl.getAttribute("data-comment-id");
-        if (!commentNodeId) {
-          showThreadError(threadEl, "Missing comment node ID for delete.");
+        const commentId = actionEl.getAttribute("data-comment-id");
+        if (!commentId) {
+          showThreadError(threadEl, "Missing review comment ID for delete.");
           return;
         }
         const reset = setButtonBusy(actionEl, "Deleting...");
         try {
-          await deleteReviewComment(commentNodeId);
-          removeCommentLocally(commentNodeId);
+          const result = await deleteReviewComment(commentId);
+          if (!result.ok) throw new Error(result.error || "Delete failed.");
+          removeCommentLocally(commentId);
           renderExistingComments();
           scheduleReinit(1200, true);
         } catch (error) {
@@ -889,6 +1197,7 @@
   }
 
   function renderExistingComments() {
+    restoreMovedNativeThreads();
     document.querySelectorAll(".grdc-existing-thread").forEach((el) => el.remove());
     const grouped = new Map();
 
@@ -903,7 +1212,9 @@
       const key = buildAnchorKey(head);
       const anchorEl = findAnchorElement(head.path, head.line, head.startLine);
       if (!anchorEl) return;
-      renderThreadOnElement(anchorEl, grouped.get(key));
+      const threadComments = grouped.get(key);
+      if (mountNativeThreadOnElement(anchorEl, threadComments)) return;
+      renderThreadOnElement(anchorEl, threadComments);
     });
   }
 
@@ -1080,6 +1391,7 @@
     existingComments = fetchExistingComments();
     if (token !== initToken) return;
 
+    restoreMovedNativeThreads();
     document.querySelectorAll(".grdc-existing-thread, .grdc-comment-btn, .grdc-comment-box").forEach((el) => el.remove());
     document.querySelectorAll(".grdc-hoverable").forEach((el) => el.classList.remove("grdc-hoverable"));
     attachCommentButtons();
