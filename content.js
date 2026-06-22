@@ -287,17 +287,7 @@
 
     try {
       const url = `${prInfo.origin}/${prInfo.owner}/${prInfo.repo}/pull/${prInfo.pullNumber}/changes`;
-      let text = "";
-
-      try {
-        text = await fetchText(url, {
-          Accept: "application/json",
-          "X-Requested-With": "XMLHttpRequest",
-          "GitHub-Verified-Fetch": "true"
-        });
-      } catch (_) {
-        text = await fetchText(url);
-      }
+      const text = await fetchText(url);
 
       try {
         const data = JSON.parse(text);
@@ -331,7 +321,6 @@
       method: "POST",
       allowHttpError: true,
       headers: {
-        Accept: "application/json",
         "Content-Type": "application/json",
         "X-Requested-With": "XMLHttpRequest",
         "GitHub-Verified-Fetch": "true",
@@ -370,7 +359,6 @@
           method: "POST",
           allowHttpError: true,
           headers: {
-            Accept: "application/json",
             "Content-Type": "application/json",
             "X-Requested-With": "XMLHttpRequest",
             "GitHub-Verified-Fetch": "true"
@@ -1158,7 +1146,6 @@
           method: "DELETE",
           allowHttpError: true,
           headers: {
-            Accept: "application/json",
             "X-Requested-With": "XMLHttpRequest",
             "GitHub-Verified-Fetch": "true"
           }
@@ -1443,7 +1430,6 @@
         {
           method: "POST",
           headers: {
-            Accept: "application/json",
             "Content-Type": "application/json",
             "X-Requested-With": "XMLHttpRequest",
             "GitHub-Verified-Fetch": "true"
