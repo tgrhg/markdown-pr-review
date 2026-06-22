@@ -40,6 +40,7 @@
   const movedNativeThreads = new Map();
   let pageBridgeReady = false;
   let pageBridgePromise = null;
+  const OID_RE = /[0-9a-f]{40}/i;
 
   function safeEscapeHtml(value) {
     if (typeof escapeHtml === "function") return escapeHtml(value);
@@ -458,6 +459,89 @@
       container.querySelector(".rich-diff-level-one .markdown-body");
   }
 
+  function readOidValue(value) {
+    if (!value) return null;
+    if (typeof value === "string" && OID_RE.test(value)) {
+      const match = value.match(OID_RE);
+      return match ? match[0] : null;
+    }
+    if (typeof value === "object") {
+      if (typeof value.oid === "string" && OID_RE.test(value.oid)) return value.oid.match(OID_RE)[0];
+      if (typeof value.id === "string" && OID_RE.test(value.id)) return value.id.match(OID_RE)[0];
+      if (typeof value.commitOid === "string" && OID_RE.test(value.commitOid)) return value.commitOid.match(OID_RE)[0];
+    }
+    return null;
+  }
+
+  function collectCommitOidsFromJson(node, out, depth) {
+    depth = depth || 0;
+    if (!node || typeof node !== "object" || depth > 10) return out;
+
+    if (Array.isArray(node)) {
+      node.forEach((item) => collectCommitOidsFromJson(item, out, depth + 1));
+      return out;
+    }
+
+    Object.entries(node).forEach(([key, value]) => {
+      const normalized = String(key || "").toLowerCase();
+      const oid = readOidValue(value);
+
+      if (oid) {
+        if (!out.head && /^(head|headoid|head_oid|headcommit|head_commit|headcommitoid|head_commit_oid|comparisonendoid|comparison_end_oid|headrefoid|head_ref_oid|endcommitoid|end_commit_oid)$/.test(normalized)) {
+          out.head = oid;
+        }
+        if (!out.base && /^(base|baseoid|base_oid|basecommit|base_commit|basecommitoid|base_commit_oid|comparisonstartoid|comparison_start_oid|mergebase|merge_base|mergebaseoid|merge_base_oid|mergebasecommit|merge_base_commit|startcommitoid|start_commit_oid)$/.test(normalized)) {
+          out.base = oid;
+        }
+      }
+
+      if (value && typeof value === "object") {
+        if (!out.head && /head/.test(normalized)) {
+          const nestedHead = readOidValue(value);
+          if (nestedHead) out.head = nestedHead;
+        }
+        if (!out.base && /(base|comparisonstart|mergebase)/.test(normalized)) {
+          const nestedBase = readOidValue(value);
+          if (nestedBase) out.base = nestedBase;
+        }
+        collectCommitOidsFromJson(value, out, depth + 1);
+      }
+    });
+
+    return out;
+  }
+
+  function collectCommitOidsFromText(text, out) {
+    if (!text) return out;
+
+    const patterns = [
+      { kind: "head", re: /"head(?:Ref|Commit)?(?:Oid|OID|oid)?"\s*:\s*"([0-9a-f]{40})"/ig },
+      { kind: "head", re: /"comparisonEndOid"\s*:\s*"([0-9a-f]{40})"/ig },
+      { kind: "head", re: /"comparison_end_oid"\s*:\s*"([0-9a-f]{40})"/ig },
+      { kind: "head", re: /"end_commit_oid"\s*:\s*"([0-9a-f]{40})"/ig },
+      { kind: "head", re: /"head_commit_oid"\s*:\s*"([0-9a-f]{40})"/ig },
+      { kind: "head", re: /"headCommit"\s*:\s*\{[^{}]{0,400}?"oid"\s*:\s*"([0-9a-f]{40})"/ig },
+      { kind: "base", re: /"base(?:Commit)?(?:Oid|OID|oid)?"\s*:\s*"([0-9a-f]{40})"/ig },
+      { kind: "base", re: /"comparisonStartOid"\s*:\s*"([0-9a-f]{40})"/ig },
+      { kind: "base", re: /"comparison_start_oid"\s*:\s*"([0-9a-f]{40})"/ig },
+      { kind: "base", re: /"mergeBase(?:Commit)?(?:Oid|OID|oid)?"\s*:\s*"([0-9a-f]{40})"/ig },
+      { kind: "base", re: /"merge_base(?:_commit)?_oid"\s*:\s*"([0-9a-f]{40})"/ig },
+      { kind: "base", re: /"base_commit_oid"\s*:\s*"([0-9a-f]{40})"/ig },
+      { kind: "base", re: /"start_commit_oid"\s*:\s*"([0-9a-f]{40})"/ig },
+      { kind: "base", re: /"baseCommit"\s*:\s*\{[^{}]{0,400}?"oid"\s*:\s*"([0-9a-f]{40})"/ig },
+      { kind: "base", re: /"mergeBaseCommit"\s*:\s*\{[^{}]{0,400}?"oid"\s*:\s*"([0-9a-f]{40})"/ig }
+    ];
+
+    for (const { kind, re } of patterns) {
+      if ((kind === "head" && out.head) || (kind === "base" && out.base)) continue;
+      const match = re.exec(text);
+      if (match?.[1]) out[kind] = match[1];
+      re.lastIndex = 0;
+    }
+
+    return out;
+  }
+
   function discoverCommitOids(container) {
     const oids = { head: null, base: null };
     const blobLink = (container || document).querySelector('a[href*="/blob/"]');
@@ -468,13 +552,11 @@
 
     for (const script of document.querySelectorAll('script[type="application/json"], script')) {
       const text = script.textContent || "";
-      if (!oids.head) {
-        const m = text.match(/"head[_A-Za-z]*[Oo]id"\s*:\s*"([0-9a-f]{40})"/);
-        if (m) oids.head = m[1];
-      }
-      if (!oids.base) {
-        const m = text.match(/"(?:base|merge_base|comparisonStart)[_A-Za-z]*[Oo]id"\s*:\s*"([0-9a-f]{40})"/);
-        if (m) oids.base = m[1];
+      collectCommitOidsFromText(text, oids);
+      try {
+        const parsed = JSON.parse(text);
+        collectCommitOidsFromJson(parsed, oids);
+      } catch (_) {
       }
       if (oids.head && oids.base) break;
     }
