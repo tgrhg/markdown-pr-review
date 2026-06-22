@@ -450,6 +450,50 @@
     return oids;
   }
 
+  async function resolveComparisonOids(container) {
+    if (!routeData) {
+      try {
+        await fetchRouteData();
+      } catch (_) {
+      }
+    }
+
+    const discovered = discoverCommitOids(container || document);
+    const comparison = routeData?.comparison || {};
+    const fullDiff = comparison?.fullDiff || {};
+
+    const headOid =
+      prInfo?.headOid ||
+      comparison.headOid ||
+      comparison.comparisonEndOid ||
+      comparison.headCommitOid ||
+      fullDiff.headOid ||
+      fullDiff.comparisonEndOid ||
+      fullDiff.headCommitOid ||
+      discovered.head ||
+      null;
+
+    const baseOid =
+      prInfo?.baseOid ||
+      comparison.comparisonStartOid ||
+      comparison.baseOid ||
+      comparison.mergeBaseOid ||
+      comparison.baseCommitOid ||
+      fullDiff.comparisonStartOid ||
+      fullDiff.baseOid ||
+      fullDiff.mergeBaseOid ||
+      fullDiff.baseCommitOid ||
+      discovered.base ||
+      null;
+
+    if (prInfo) {
+      if (headOid) prInfo.headOid = headOid;
+      if (baseOid) prInfo.baseOid = baseOid;
+    }
+
+    return { head: headOid, base: baseOid };
+  }
+
   async function fetchRawSource(container, path) {
     if (rawSourceCache.has(path)) return rawSourceCache.get(path);
 
@@ -1081,15 +1125,9 @@
   }
 
   async function replyToReviewComment(commentId, body) {
-    const oids = discoverCommitOids(document);
-    const headOid = routeData?.comparison?.fullDiff?.headOid ||
-      routeData?.comparison?.headOid ||
-      oids.head;
-    const baseOid = routeData?.comparison?.fullDiff?.comparisonStartOid ||
-      routeData?.comparison?.comparisonStartOid ||
-      routeData?.comparison?.fullDiff?.baseOid ||
-      routeData?.comparison?.baseOid ||
-      oids.base;
+    const oids = await resolveComparisonOids(document);
+    const headOid = oids.head;
+    const baseOid = oids.base;
 
     return pageDataPost(
       [{
@@ -1305,7 +1343,7 @@
   }
 
   async function postReviewComment(path, line, body, opts) {
-    const oids = discoverCommitOids(document);
+    const oids = await resolveComparisonOids(document);
     if (!prInfo || !oids.head || !oids.base) {
       return { ok: false, error: "Could not resolve PR comparison commits on this page." };
     }
