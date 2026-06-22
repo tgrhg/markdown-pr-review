@@ -244,20 +244,67 @@
     }
   }
 
+  function findChangesRouteInJson(node, depth) {
+    depth = depth || 0;
+    if (!node || typeof node !== "object" || depth > 10) return null;
+    if (Array.isArray(node?.diffSummaries) && node?.comparison) return node;
+
+    if (node?.payload?.pullRequestsChangesRoute) {
+      return node.payload.pullRequestsChangesRoute;
+    }
+
+    for (const key of Object.keys(node)) {
+      const value = node[key];
+      if (value && typeof value === "object") {
+        const found = findChangesRouteInJson(value, depth + 1);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  function extractRouteDataFromHtml(html) {
+    if (!html || typeof html !== "string") return null;
+    const scriptRe = /<script[^>]*type=["']application\/json["'][^>]*>([\s\S]*?)<\/script>/g;
+    let match;
+
+    while ((match = scriptRe.exec(html)) !== null) {
+      try {
+        const div = document.createElement("div");
+        div.innerHTML = match[1];
+        const json = JSON.parse(div.textContent || "");
+        const found = findChangesRouteInJson(json);
+        if (found) return found;
+      } catch (_) {
+      }
+    }
+
+    return null;
+  }
+
   async function fetchRouteData() {
     if (routeData || !prInfo) return routeData;
 
     try {
-      const text = await fetchText(
-        `${prInfo.origin}/${prInfo.owner}/${prInfo.repo}/pull/${prInfo.pullNumber}/changes`,
-        {
+      const url = `${prInfo.origin}/${prInfo.owner}/${prInfo.repo}/pull/${prInfo.pullNumber}/changes`;
+      let text = "";
+
+      try {
+        text = await fetchText(url, {
           Accept: "application/json",
           "X-Requested-With": "XMLHttpRequest",
           "GitHub-Verified-Fetch": "true"
-        }
-      );
-      const data = JSON.parse(text);
-      routeData = data?.payload?.pullRequestsChangesRoute || null;
+        });
+      } catch (_) {
+        text = await fetchText(url);
+      }
+
+      try {
+        const data = JSON.parse(text);
+        routeData = data?.payload?.pullRequestsChangesRoute || findChangesRouteInJson(data) || null;
+      } catch (_) {
+        routeData = extractRouteDataFromHtml(text);
+      }
     } catch (e) {
       console.log("[MRO] Failed to fetch route data:", e.message);
     }
