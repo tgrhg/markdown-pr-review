@@ -230,8 +230,18 @@
 
   async function fetchText(url, acceptOrHeaders) {
     const headers = typeof acceptOrHeaders === "string" ? { Accept: acceptOrHeaders } : (acceptOrHeaders || {});
-    const response = await pageFetch(url, { headers });
-    return response.text;
+    try {
+      const response = await pageFetch(url, { headers });
+      return response.text;
+    } catch (error) {
+      const message = error?.message || String(error);
+      if (!/406/.test(message) || !headers.Accept) throw error;
+
+      const retryHeaders = { ...headers };
+      delete retryHeaders.Accept;
+      const response = await pageFetch(url, { headers: retryHeaders });
+      return response.text;
+    }
   }
 
   async function fetchRouteData() {
@@ -345,6 +355,12 @@
     return Array.from(document.querySelectorAll('div[id^="diff-"], [data-tagsearch-path], .file[data-path], .file'));
   }
 
+  function getMarkdownDiffSummaryPaths() {
+    return (routeData?.diffSummaries || [])
+      .map((summary) => summary?.path)
+      .filter((path) => isMarkdownPath(path));
+  }
+
   function getFilePath(container) {
     const containerId = container.id || "";
     if (containerId.startsWith("diff-")) {
@@ -382,6 +398,16 @@
       const href = blobLink.getAttribute("href") || "";
       const match = href.match(/\/blob\/[^/]+\/(.+)$/i);
       if (match) return decodeURIComponent(match[1]);
+    }
+
+    const richDiff = getRichDiff(container);
+    if (richDiff) {
+      const containers = getFileContainers().filter((item) => !!getRichDiff(item));
+      const containerIndex = containers.indexOf(container);
+      const markdownPaths = getMarkdownDiffSummaryPaths();
+      if (containerIndex >= 0 && containerIndex < markdownPaths.length) {
+        return markdownPaths[containerIndex];
+      }
     }
 
     return null;
@@ -498,7 +524,6 @@
       if (!isMarkdownPath(path)) continue;
       const richDiff = getRichDiff(container);
       if (!richDiff) continue;
-      if (container.querySelector("[data-line-number], .blob-num")) continue;
       eligible.push({ container, path, richDiff });
     }
 
