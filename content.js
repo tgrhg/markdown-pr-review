@@ -380,7 +380,7 @@
     const blobLink = container.querySelector('a[href*="/blob/"]');
     if (blobLink) {
       const href = blobLink.getAttribute("href") || "";
-      const match = href.match(/\/blob\/[0-9a-f]{40}\/(.+)$/i);
+      const match = href.match(/\/blob\/[^/]+\/(.+)$/i);
       if (match) return decodeURIComponent(match[1]);
     }
 
@@ -428,41 +428,63 @@
     if (rawSourceCache.has(path)) return rawSourceCache.get(path);
 
     const oids = discoverCommitOids(container);
-    if (!oids.head || !prInfo || !looksLikePath(path)) return null;
+    if (!prInfo || !looksLikePath(path)) return null;
 
-    try {
-      const blobUrl = `${prInfo.origin}/${prInfo.owner}/${prInfo.repo}/blob/${oids.head}/${encodeURI(path)}`;
-      const html = await fetchText(blobUrl, "text/html,*/*");
-
-      let m = html.match(/<textarea[^>]*id=["']read-only-cursor-text-area["'][^>]*>([\s\S]*?)<\/textarea>/);
-      if (m) {
-        const div = document.createElement("div");
-        div.innerHTML = m[1];
-        const text = div.textContent || "";
-        if (text) {
-          rawSourceCache.set(path, text);
-          return text;
-        }
+    const blobCandidates = [];
+    const exactBlobLink = container.querySelector('a[href*="/blob/"]');
+    if (exactBlobLink) {
+      try {
+        blobCandidates.push(new URL(exactBlobLink.getAttribute("href"), prInfo.origin).toString());
+      } catch (_) {
       }
+    }
+    if (oids.head) {
+      blobCandidates.push(`${prInfo.origin}/${prInfo.owner}/${prInfo.repo}/blob/${oids.head}/${encodeURI(path)}`);
+    }
 
-      const scriptRe = /<script[^>]*type=["']application\/json["'][^>]*>([\s\S]*?)<\/script>/g;
-      let scriptMatch;
-      while ((scriptMatch = scriptRe.exec(html)) !== null) {
-        if (!scriptMatch[1].includes("rawLines") && !scriptMatch[1].includes("rawBlob")) continue;
-        try {
+    const uniqueBlobCandidates = Array.from(new Set(blobCandidates));
+    if (!uniqueBlobCandidates.length) return null;
+
+    for (const blobUrl of uniqueBlobCandidates) {
+      try {
+        const html = await fetchText(blobUrl, "text/html,*/*");
+
+        let m = html.match(/<textarea[^>]*id=["']read-only-cursor-text-area["'][^>]*>([\s\S]*?)<\/textarea>/);
+        if (!m) {
+          m = html.match(/<textarea[^>]*data-testid=["']read-only-cursor-text-area["'][^>]*>([\s\S]*?)<\/textarea>/);
+        }
+        if (!m) {
+          m = html.match(/<textarea[^>]*>([\s\S]*?)<\/textarea>/);
+        }
+        if (m) {
           const div = document.createElement("div");
-          div.innerHTML = scriptMatch[1];
-          const json = JSON.parse(div.textContent);
-          const found = findBlobInJson(json);
-          if (found) {
-            rawSourceCache.set(path, found);
-            return found;
+          div.innerHTML = m[1];
+          const text = div.textContent || "";
+          if (text) {
+            rawSourceCache.set(path, text);
+            return text;
           }
-        } catch (_) {
         }
+
+        const scriptRe = /<script[^>]*type=["']application\/json["'][^>]*>([\s\S]*?)<\/script>/g;
+        let scriptMatch;
+        while ((scriptMatch = scriptRe.exec(html)) !== null) {
+          if (!scriptMatch[1].includes("rawLines") && !scriptMatch[1].includes("rawBlob")) continue;
+          try {
+            const div = document.createElement("div");
+            div.innerHTML = scriptMatch[1];
+            const json = JSON.parse(div.textContent);
+            const found = findBlobInJson(json);
+            if (found) {
+              rawSourceCache.set(path, found);
+              return found;
+            }
+          } catch (_) {
+          }
+        }
+      } catch (e) {
+        console.log("[MRO] Blob HTML error for", path, blobUrl, e.message);
       }
-    } catch (e) {
-      console.log("[MRO] Blob HTML error for", path, e.message);
     }
 
     return null;

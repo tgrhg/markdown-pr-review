@@ -27,7 +27,7 @@
     return (
       pathname === `${pullBase}/changes` ||
       pathname.startsWith(`${pullBase}/page_data/`) ||
-      /^\/[^/]+\/[^/]+\/blob\/[0-9a-f]{40}\//i.test(pathname)
+      /^\/[^/]+\/[^/]+\/blob\/[^/]+\//i.test(pathname)
     );
   }
 

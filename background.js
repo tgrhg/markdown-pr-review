@@ -16,7 +16,7 @@ function isAllowedSameOriginPath(pathname) {
   return (
     /^\/[^/]+\/[^/]+\/pull\/\d+\/changes$/.test(pathname) ||
     /^\/[^/]+\/[^/]+\/pull\/\d+\/page_data\//.test(pathname) ||
-    /^\/[^/]+\/[^/]+\/blob\/[0-9a-f]{40}\//i.test(pathname) ||
+    /^\/[^/]+\/[^/]+\/blob\/[^/]+\//i.test(pathname) ||
     /^\/graphql$/.test(pathname) ||
     /^\/api\/graphql$/.test(pathname) ||
     /^\/api\/v3\//.test(pathname)
