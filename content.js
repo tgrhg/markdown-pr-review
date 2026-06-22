@@ -542,6 +542,39 @@
     return out;
   }
 
+  function collectCommitOidsFromDom(root, out) {
+    const scope = root || document;
+    const selectors = [
+      "[value]",
+      "[data-base-commit-oid]",
+      "[data-start-commit-oid]",
+      "[data-end-commit-oid]",
+      "[data-comparison-start-oid]",
+      "[data-comparison-end-oid]"
+    ];
+
+    scope.querySelectorAll(selectors.join(",")).forEach((element) => {
+      if (out.head && out.base) return;
+
+      const attrs = Array.from(element.attributes || []);
+      attrs.forEach((attr) => {
+        const name = String(attr.name || "").toLowerCase();
+        const value = String(attr.value || "");
+        const oid = readOidValue(value);
+        if (!oid) return;
+
+        if (!out.head && /(head|comparison_end|end_commit)/.test(name)) {
+          out.head = oid;
+        }
+        if (!out.base && /(base|comparison_start|start_commit|merge_base)/.test(name)) {
+          out.base = oid;
+        }
+      });
+    });
+
+    return out;
+  }
+
   function discoverCommitOids(container) {
     const oids = { head: null, base: null };
     const blobLink = (container || document).querySelector('a[href*="/blob/"]');
@@ -559,6 +592,11 @@
       } catch (_) {
       }
       if (oids.head && oids.base) break;
+    }
+
+    collectCommitOidsFromDom(container || document, oids);
+    if (!oids.head || !oids.base) {
+      collectCommitOidsFromDom(document, oids);
     }
 
     if (routeData?.comparison?.fullDiff?.headOid) oids.head = routeData.comparison.fullDiff.headOid;
