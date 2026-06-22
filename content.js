@@ -37,6 +37,8 @@
   let reinitTimer = null;
   let runtimeError = "";
   let viewerLogin = "";
+  let hudCollapsed = false;
+  let activeThreadAnchor = "";
   const movedNativeThreads = new Map();
 
   function safeEscapeHtml(value) {
@@ -638,8 +640,82 @@
     };
   }
 
+  function getRenderedThreadElements() {
+    return Array.from(document.querySelectorAll(".grdc-existing-thread, .grdc-native-thread"))
+      .filter((element) => element instanceof HTMLElement && element.isConnected)
+      .sort((a, b) => {
+        const aLine = parseLineFromAnchor(a.dataset.grdcAnchor || "") ?? Number.MAX_SAFE_INTEGER;
+        const bLine = parseLineFromAnchor(b.dataset.grdcAnchor || "") ?? Number.MAX_SAFE_INTEGER;
+        if (aLine !== bLine) return aLine - bLine;
+        const ay = a.getBoundingClientRect().top + window.scrollY;
+        const by = b.getBoundingClientRect().top + window.scrollY;
+        return ay - by;
+      });
+  }
+
+  function getCurrentThreadIndex(threads) {
+    if (!threads.length) return -1;
+    if (activeThreadAnchor) {
+      const exact = threads.findIndex((thread) => (thread.dataset.grdcAnchor || "") === activeThreadAnchor);
+      if (exact >= 0) return exact;
+    }
+
+    const viewportMid = window.scrollY + (window.innerHeight * 0.5);
+    let bestIndex = 0;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    threads.forEach((thread, index) => {
+      const rect = thread.getBoundingClientRect();
+      const center = rect.top + window.scrollY + (rect.height * 0.5);
+      const distance = Math.abs(center - viewportMid);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = index;
+      }
+    });
+    return bestIndex;
+  }
+
+  function highlightThread(thread) {
+    thread.classList.remove("grdc-thread-active");
+    void thread.offsetWidth;
+    thread.classList.add("grdc-thread-active");
+    window.setTimeout(() => thread.classList.remove("grdc-thread-active"), 1800);
+  }
+
+  function bindThreadFocus(element) {
+    if (!element || element.dataset.grdcFocusBound === "1") return;
+    element.dataset.grdcFocusBound = "1";
+    element.addEventListener("click", () => {
+      activeThreadAnchor = element.dataset.grdcAnchor || "";
+      renderHud();
+    });
+  }
+
+  function focusThreadByIndex(index) {
+    const threads = getRenderedThreadElements();
+    if (!threads.length) return;
+    const normalized = ((index % threads.length) + threads.length) % threads.length;
+    const thread = threads[normalized];
+    activeThreadAnchor = thread.dataset.grdcAnchor || "";
+    if (thread.classList.contains("grdc-existing-thread")) {
+      const body = thread.querySelector(".grdc-thread-body");
+      if (body) body.style.display = "block";
+    }
+    thread.scrollIntoView({ behavior: "smooth", block: "center" });
+    highlightThread(thread);
+    renderHud();
+  }
+
+  function navigateThreads(delta) {
+    const threads = getRenderedThreadElements();
+    if (!threads.length) return;
+    const current = getCurrentThreadIndex(threads);
+    focusThreadByIndex((current < 0 ? 0 : current) + delta);
+  }
+
   function renderHud() {
     document.querySelectorAll(`.${EXT}-hud`).forEach((el) => el.remove());
+    document.querySelectorAll(`.${EXT}-hud-pill`).forEach((el) => el.remove());
     const containers = getFileContainers();
     const markdownFiles = containers.map(getFilePath).filter(isMarkdownPath).length;
     const richDiffFiles = containers.filter((c) => {
@@ -647,12 +723,29 @@
       return isMarkdownPath(path) && !!getRichDiff(c);
     }).length;
     const commentableBlocks = fileLineMap.size;
-    const routeFiles = routeData?.diffSummaries?.length || 0;
+    const openThreads = getRenderedThreadElements();
+    const currentThreadIndex = getCurrentThreadIndex(openThreads);
+    const reviewableFiles = new Set(existingComments.map((comment) => comment.path).filter(Boolean)).size;
     const note = runtimeError || (richDiffFiles === 0
       ? "Rich Diff を開いたあとに Reload / Rescan を押してください。"
       : commentableBlocks === 0
         ? "Rich Diff は読めていますが、行マッピングがまだ作れていません。対象 markdown の raw 取得を再試行してください。"
-        : "既存スレッドは native thread を優先して移設し、見つからない場合だけ簡易表示へフォールバックします。");
+        : "Next / Prev で未解決 thread を順に確認できます。");
+
+    if (hudCollapsed) {
+      const pill = document.createElement("button");
+      pill.type = "button";
+      pill.className = `${EXT}-hud-pill`;
+      pill.innerHTML = `<span>MRO</span><strong>${openThreads.length}</strong>`;
+      pill.title = "Open Markdown Review Overlay";
+      pill.addEventListener("click", () => {
+        hudCollapsed = false;
+        renderHud();
+      });
+      document.body.appendChild(pill);
+      return;
+    }
+
     const hud = document.createElement("aside");
     hud.className = `${EXT}-hud`;
     hud.innerHTML = `
@@ -662,20 +755,47 @@
           <div class="${EXT}-hud-title">${safeEscapeHtml(window.location.host)}</div>
         </div>
         <div class="${EXT}-hud-controls">
+          <button type="button" class="${EXT}-hud-toggle" data-action="collapse" title="Collapse">-</button>
           <button type="button" class="${EXT}-hud-action">Reload / Rescan</button>
         </div>
       </div>
       <div class="${EXT}-hud-body">
+        <div class="${EXT}-hud-nav">
+          <button type="button" class="${EXT}-hud-toggle" data-action="prev-thread" title="Previous thread">↑</button>
+          <div class="${EXT}-hud-position">
+            <strong>${openThreads.length ? currentThreadIndex + 1 : 0} / ${openThreads.length}</strong>
+            <span>Open Threads</span>
+          </div>
+          <button type="button" class="${EXT}-hud-toggle" data-action="next-thread" title="Next thread">↓</button>
+        </div>
         <div class="${EXT}-hud-grid">
-          <div class="${EXT}-hud-stat"><strong>${routeFiles}</strong><span>Route files</span></div>
-          <div class="${EXT}-hud-stat"><strong>${markdownFiles}</strong><span>Markdown files</span></div>
+          <div class="${EXT}-hud-stat"><strong>${openThreads.length}</strong><span>Open threads</span></div>
+          <div class="${EXT}-hud-stat"><strong>${reviewableFiles}</strong><span>Files with threads</span></div>
           <div class="${EXT}-hud-stat"><strong>${richDiffFiles}</strong><span>Rich diff files</span></div>
-          <div class="${EXT}-hud-stat"><strong>${commentableBlocks}</strong><span>Commentable blocks</span></div>
+          <div class="${EXT}-hud-stat"><strong>${markdownFiles}</strong><span>Markdown files</span></div>
         </div>
         <div class="${EXT}-hud-note">${safeEscapeHtml(note)}</div>
       </div>
     `;
+    hud.addEventListener("click", (event) => {
+      const actionEl = event.target.closest("[data-action]");
+      if (!actionEl) return;
+      const action = actionEl.getAttribute("data-action");
+      if (action === "collapse") {
+        hudCollapsed = true;
+        renderHud();
+        return;
+      }
+      if (action === "prev-thread") {
+        navigateThreads(-1);
+        return;
+      }
+      if (action === "next-thread") {
+        navigateThreads(1);
+      }
+    });
     hud.querySelector(`.${EXT}-hud-action`).addEventListener("click", () => {
+      activeThreadAnchor = "";
       invalidateCaches();
       scheduleReinit();
     });
@@ -910,6 +1030,7 @@
     }
 
     nativeThread.dataset.grdcAnchor = buildAnchorKey(threadComments[0]);
+    bindThreadFocus(nativeThread);
     anchor.insert(nativeThread, insertBefore);
     return true;
   }
@@ -1174,6 +1295,7 @@
     if (!threadComments.length) return;
     const head = threadComments[0];
     const threadEl = createThreadElement(threadComments);
+    bindThreadFocus(threadEl);
     bindThreadActions(threadEl, threadComments);
     const anchor = createInsertAnchor(element);
     const anchorLine = head.startLine != null ? head.startLine : head.line;

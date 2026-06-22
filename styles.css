@@ -72,40 +72,51 @@ html[data-color-mode="dark"] {
 
 .grdc-comment-btn {
   position: absolute;
-  top: 0.4rem;
-  right: 0.4rem;
+  top: 0.35rem;
+  right: 0.35rem;
   z-index: 30;
   display: inline-grid;
   place-items: center;
-  width: 2rem;
-  height: 2rem;
+  width: 1.75rem;
+  height: 1.75rem;
   padding: 0;
   border: 1px solid var(--mro-border);
   border-radius: 999px;
   background:
-    radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.9), transparent 55%),
-    linear-gradient(135deg, rgba(15, 118, 110, 0.96), rgba(37, 99, 235, 0.96));
-  color: #fff;
-  box-shadow: var(--mro-shadow-sm);
+    radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.42), transparent 58%),
+    color-mix(in srgb, var(--mro-bg-strong) 84%, transparent);
+  color: var(--mro-text-soft);
+  box-shadow:
+    0 8px 18px rgba(15, 23, 42, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  backdrop-filter: blur(12px);
   cursor: pointer;
   opacity: 0;
-  transform: translateY(-2px) scale(0.92);
+  transform: translateY(-1px) scale(0.94);
   transition:
     opacity var(--mro-ease),
     transform var(--mro-ease),
     box-shadow var(--mro-ease),
-    filter var(--mro-ease);
+    border-color var(--mro-ease),
+    color var(--mro-ease),
+    background var(--mro-ease);
 }
 
 .grdc-comment-btn:hover {
-  transform: translateY(-4px) scale(1);
-  box-shadow: var(--mro-shadow-md);
-  filter: saturate(1.08);
+  transform: translateY(-2px) scale(1);
+  border-color: color-mix(in srgb, var(--mro-accent-2) 28%, var(--mro-border));
+  background:
+    radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.58), transparent 58%),
+    linear-gradient(135deg, color-mix(in srgb, var(--mro-accent) 12%, var(--mro-bg-strong)), color-mix(in srgb, var(--mro-accent-2) 14%, var(--mro-bg-strong)));
+  color: var(--mro-text);
+  box-shadow:
+    0 12px 24px rgba(15, 23, 42, 0.12),
+    0 0 0 4px color-mix(in srgb, var(--mro-accent-2) 10%, transparent);
 }
 
 .grdc-comment-btn svg {
-  width: 0.92rem;
-  height: 0.92rem;
+  width: 0.7rem;
+  height: 0.7rem;
 }
 
 .prose-diff :is(h1, h2, h3, h4, h5, h6, p, li, blockquote, pre, tr):hover > .grdc-comment-btn,
@@ -131,6 +142,13 @@ html[data-color-mode="dark"] {
 .grdc-native-thread {
   margin: 0.8rem 0 1rem;
   animation: mro-rise-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.grdc-existing-thread.grdc-thread-active,
+.grdc-native-thread.grdc-thread-active {
+  box-shadow:
+    0 0 0 2px rgba(37, 99, 235, 0.22),
+    var(--mro-shadow-md);
 }
 
 .grdc-existing-thread::before,
@@ -405,10 +423,35 @@ html[data-color-mode="dark"] {
   animation: mro-float-in 260ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+.mro-hud-pill {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  z-index: 999997;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.72rem 0.9rem;
+  border: 1px solid var(--mro-border);
+  border-radius: 999px;
+  background: var(--mro-panel);
+  color: var(--mro-text);
+  box-shadow: var(--mro-shadow-md);
+  backdrop-filter: blur(18px);
+  font: 800 12px/1 var(--mro-font);
+  cursor: pointer;
+}
+
+.mro-hud-pill span {
+  color: var(--mro-accent);
+  letter-spacing: 0.08em;
+}
+
 .mro-hud-top,
 .mro-hud-grid,
 .mro-file-badge,
-.mro-hud-controls {
+.mro-hud-controls,
+.mro-hud-nav {
   display: flex;
   align-items: center;
 }
@@ -454,6 +497,39 @@ html[data-color-mode="dark"] {
 .mro-hud-grid {
   gap: 0.75rem;
   flex-wrap: wrap;
+}
+
+.mro-hud-nav {
+  justify-content: space-between;
+  gap: 0.8rem;
+  margin-bottom: 0.8rem;
+  padding: 0.82rem 0.88rem;
+  border: 1px solid var(--mro-border);
+  border-radius: 18px;
+  background: var(--mro-bg);
+}
+
+.mro-hud-position {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.mro-hud-position strong,
+.mro-hud-position span {
+  display: block;
+}
+
+.mro-hud-position strong {
+  color: var(--mro-text);
+  font: 800 16px/1 var(--mro-font);
+}
+
+.mro-hud-position span {
+  margin-top: 0.28rem;
+  color: var(--mro-text-soft);
+  font: 700 11px/1.3 var(--mro-font);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .mro-hud-stat {
