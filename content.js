@@ -517,7 +517,7 @@
 
     for (const blobUrl of uniqueBlobCandidates) {
       try {
-        const html = await fetchText(blobUrl, "text/html,*/*");
+        const html = await fetchText(blobUrl);
 
         let m = html.match(/<textarea[^>]*id=["']read-only-cursor-text-area["'][^>]*>([\s\S]*?)<\/textarea>/);
         if (!m) {
