@@ -50,7 +50,9 @@
 - `content.js`
   PR 判定、diff 取得、行マッピング、UI 注入、コメント投稿
 - `page-bridge.js`
-  ページコンテキストで same-origin fetch を実行する bridge
+  same-origin の GitHub / GHE 内部パスだけを許可する page context fetch bridge
+- `background.js`
+  allowlist 付き fallback fetch proxy
 - `styles.css`
   注入 UI の見た目。hover button、thread card、composer、HUD を含む
 - `popup.html`, `popup.css`
@@ -70,7 +72,9 @@
 - `pull/<number>/changes` の route data を same-origin で取得する
 - route data から diff summary と marker thread 情報を取得する
 - 各 Markdown file の raw content を same-origin で取得する
-- 取得は extension fetch ではなく page-side bridge を使い、ブラウザセッション cookie をそのまま使う
+- same-origin の `changes`, `page_data`, `blob` 取得は page context bridge 経由で行う
+- page bridge は PR 文脈の current origin と allowlist path のみを許可する
+- cross-origin が必要な場合のみ background service worker 側の allowlist proxy を使う
 - route data の path digest と rich diff DOM を突き合わせる
 - Markdown 拡張子のファイルのみを対象にする
 
@@ -87,6 +91,7 @@
 - ページ内スクリプトやリンクから PR 比較用の commit OID を推定する
 - 現在のホストの `page_data/create_review_comment` へ `fetch` する
 - `credentials: include` により現在のログインセッションを使う
+- reply / resolve / delete も同じ `page_data` 系 endpoint を same-origin で使う
 
 ### 6.5 Runtime Guidance UI
 

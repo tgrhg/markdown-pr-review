@@ -31,8 +31,6 @@
   let rawSourceCache = new Map();
   let pathDigestMap = new Map();
   let existingComments = [];
-  let pageBridgeReady = false;
-  let pageBridgePromise = null;
   let pageFetchSequence = 0;
   let reinitTimer = null;
   let runtimeError = "";
@@ -40,6 +38,8 @@
   let hudCollapsed = false;
   let activeThreadAnchor = "";
   const movedNativeThreads = new Map();
+  let pageBridgeReady = false;
+  let pageBridgePromise = null;
 
   function safeEscapeHtml(value) {
     if (typeof escapeHtml === "function") return escapeHtml(value);
@@ -94,58 +94,45 @@
     return meta?.content?.trim() || "";
   }
 
-  function getApiBaseUrls() {
-    if (!prInfo?.origin) return [];
-    if (prInfo.origin === "https://github.com") {
-      return ["https://github.com/api/v3", "https://api.github.com"];
-    }
-    return [`${prInfo.origin}/api/v3`];
-  }
-
-  function ensurePageBridge() {
-    if (pageBridgeReady) return Promise.resolve();
+  async function ensurePageBridge() {
+    if (pageBridgeReady) return;
     if (pageBridgePromise) return pageBridgePromise;
 
     pageBridgePromise = new Promise((resolve, reject) => {
+      const existing = document.getElementById("mro-page-bridge");
+      if (existing) {
+        pageBridgeReady = true;
+        resolve();
+        return;
+      }
+
       const script = document.createElement("script");
+      script.id = "mro-page-bridge";
       script.src = chrome.runtime.getURL("page-bridge.js");
-      script.async = false;
       script.onload = () => {
         pageBridgeReady = true;
         resolve();
       };
-      script.onerror = () => reject(new Error("Failed to load page fetch bridge."));
+      script.onerror = () => reject(new Error("Failed to load page bridge."));
       (document.head || document.documentElement).appendChild(script);
     });
 
     return pageBridgePromise;
   }
 
-  async function pageFetch(url, options) {
+  async function pageFetchViaBridge(url, options) {
     await ensurePageBridge();
-    const requestId = `mro-${Date.now()}-${pageFetchSequence++}`;
-    const request = {
-      type: "MRO_PAGE_FETCH_REQUEST",
-      requestId,
-      url,
-      method: options?.method || "GET",
-      headers: options?.headers || {},
-      body: typeof options?.body === "string" ? options.body : undefined
-    };
+
+    const requestId = `mro-page-${Date.now()}-${pageFetchSequence++}`;
+    const timeoutMs = 15000;
 
     return new Promise((resolve, reject) => {
-      const timeoutId = window.setTimeout(() => {
-        window.removeEventListener("message", onMessage);
-        reject(new Error(`Timed out while requesting ${url}`));
-      }, 15000);
-
-      function onMessage(event) {
+      const onMessage = (event) => {
+        if (event.source !== window) return;
         const data = event.data;
-        if (event.source !== window || !data || data.type !== "MRO_PAGE_FETCH_RESPONSE" || data.requestId !== requestId) {
-          return;
-        }
-        window.clearTimeout(timeoutId);
-        window.removeEventListener("message", onMessage);
+        if (!data || data.type !== "MRO_PAGE_FETCH_RESPONSE" || data.requestId !== requestId) return;
+
+        cleanup();
         if (!data.ok && !options?.allowHttpError) {
           reject(new Error(data.error || `HTTP ${data.status} ${data.statusText}`.trim()));
           return;
@@ -156,11 +143,89 @@
           statusText: data.statusText,
           text: data.text || ""
         });
-      }
+      };
+
+      const cleanup = () => {
+        window.clearTimeout(timeoutId);
+        window.removeEventListener("message", onMessage);
+      };
+
+      const timeoutId = window.setTimeout(() => {
+        cleanup();
+        reject(new Error(`Timed out while requesting ${url}`));
+      }, timeoutMs);
 
       window.addEventListener("message", onMessage);
-      window.postMessage(request, "*");
+      window.postMessage(
+        {
+          type: "MRO_PAGE_FETCH_REQUEST",
+          requestId,
+          url,
+          method: options?.method || "GET",
+          headers: options?.headers || {},
+          body: typeof options?.body === "string" ? options.body : undefined
+        },
+        window.location.origin
+      );
     });
+  }
+
+  async function pageFetchViaBackground(url, options) {
+    const requestId = `mro-${Date.now()}-${pageFetchSequence++}`;
+    const timeoutMs = 15000;
+
+    return new Promise((resolve, reject) => {
+      const timeoutId = window.setTimeout(() => {
+        reject(new Error(`Timed out while requesting ${url}`));
+      }, timeoutMs);
+
+      chrome.runtime.sendMessage(
+        {
+          type: "MRO_BACKGROUND_FETCH",
+          requestId,
+          url,
+          method: options?.method || "GET",
+          headers: options?.headers || {},
+          body: typeof options?.body === "string" ? options.body : undefined
+        },
+        (result) => {
+          window.clearTimeout(timeoutId);
+          const lastError = chrome.runtime.lastError;
+          if (lastError) {
+            reject(new Error(lastError.message));
+            return;
+          }
+          if (!result) {
+            reject(new Error(`Empty response while requesting ${url}`));
+            return;
+          }
+          if (!result.ok && !options?.allowHttpError) {
+            reject(new Error(result.error || `HTTP ${result.status} ${result.statusText}`.trim()));
+            return;
+          }
+          resolve({
+            ok: result.ok,
+            status: result.status,
+            statusText: result.statusText,
+            text: result.text || ""
+          });
+        }
+      );
+    });
+  }
+
+  async function pageFetch(url, options) {
+    let targetUrl;
+    try {
+      targetUrl = new URL(url, window.location.href);
+    } catch {
+      throw new Error(`Invalid URL: ${url}`);
+    }
+
+    if (targetUrl.origin === window.location.origin) {
+      return pageFetchViaBridge(targetUrl.toString(), options);
+    }
+    return pageFetchViaBackground(targetUrl.toString(), options);
   }
 
   async function fetchText(url, acceptOrHeaders) {
@@ -235,154 +300,6 @@
     }
 
     return parsed;
-  }
-
-  async function requestJSON(url, options) {
-    const csrfToken = detectCsrfToken();
-    const requestUrl = new URL(url, window.location.origin);
-    const method = options?.method || "GET";
-    const headers = {
-      Accept: "application/vnd.github+json",
-      "Content-Type": "application/json",
-      "X-GitHub-Api-Version": "2026-03-10",
-      "X-Requested-With": "XMLHttpRequest",
-      ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
-      ...(options?.headers || {})
-    };
-    const body = typeof options?.body === "string" ? options.body : (options?.body ? JSON.stringify(options.body) : undefined);
-
-    let response;
-    if (requestUrl.origin === window.location.origin) {
-      response = await pageFetch(requestUrl.toString(), {
-        method,
-        allowHttpError: true,
-        headers,
-        body
-      });
-    } else {
-      let raw;
-      try {
-        raw = await fetch(requestUrl.toString(), {
-          method,
-          headers,
-          body,
-          credentials: "include"
-        });
-      } catch (error) {
-        throw new Error(error?.message || "Cross-origin fetch failed.");
-      }
-      response = {
-        ok: raw.ok,
-        status: raw.status,
-        statusText: raw.statusText,
-        text: await raw.text()
-      };
-    }
-
-    let parsed = null;
-    try {
-      parsed = response.text ? JSON.parse(response.text) : null;
-    } catch {
-      parsed = null;
-    }
-
-    if (!response.ok) {
-      const errorMessage =
-        parsed?.errors?.map((e) => e.message).join(" | ") ||
-        parsed?.message ||
-        response.text ||
-        `HTTP ${response.status} ${response.statusText}`;
-      throw new Error(errorMessage);
-    }
-
-    return parsed;
-  }
-
-  async function requestJSONViaBackground(url, options) {
-    const body = typeof options?.body === "string" ? options.body : (options?.body ? JSON.stringify(options.body) : undefined);
-    const response = await new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage(
-        {
-          type: "MRO_BACKGROUND_FETCH",
-          url,
-          method: options?.method || "GET",
-          headers: options?.headers || {
-            Accept: "application/vnd.github+json",
-            "Content-Type": "application/json",
-            "X-GitHub-Api-Version": "2026-03-10"
-          },
-          body
-        },
-        (result) => {
-          const lastError = chrome.runtime.lastError;
-          if (lastError) {
-            reject(new Error(lastError.message));
-            return;
-          }
-          resolve(result);
-        }
-      );
-    });
-
-    let parsed = null;
-    try {
-      parsed = response?.text ? JSON.parse(response.text) : null;
-    } catch {
-      parsed = null;
-    }
-
-    if (!response?.ok) {
-      const errorMessage =
-        parsed?.errors?.map((e) => e.message).join(" | ") ||
-        parsed?.message ||
-        response?.error ||
-        response?.text ||
-        `HTTP ${response?.status || 0} ${response?.statusText || "FETCH_ERROR"}`;
-      throw new Error(errorMessage);
-    }
-
-    return parsed;
-  }
-
-  async function requestFromApiBases(path, options) {
-    const bases = getApiBaseUrls();
-    let lastError = null;
-
-    for (const base of bases) {
-      try {
-        const url = `${base}${path}`;
-        if (new URL(url, window.location.origin).origin === window.location.origin) {
-          return await requestJSON(url, options);
-        }
-        return await requestJSONViaBackground(url, options);
-      } catch (error) {
-        lastError = error;
-      }
-    }
-
-    throw lastError || new Error("API request failed.");
-  }
-
-  async function postGraphQL(query, variables) {
-    const urls = [`${prInfo.origin}/graphql`, `${prInfo.origin}/api/graphql`];
-    let lastError = null;
-
-    for (const url of urls) {
-      try {
-        const data = await postJSON(url, { query, variables });
-        if (!data) {
-          throw new Error("GraphQL response was empty.");
-        }
-        if (data.errors?.length) {
-          throw new Error(data.errors.map((e) => e.message).join(" | "));
-        }
-        if (data.data) return data.data;
-      } catch (error) {
-        lastError = error;
-      }
-    }
-
-    throw lastError || new Error("GraphQL request failed.");
   }
 
   async function pageDataPost(candidates, label) {

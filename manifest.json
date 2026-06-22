@@ -12,8 +12,16 @@
   },
   "host_permissions": [
     "https://github.com/*",
-    "https://*/*",
-    "http://*/*"
+    "https://*/*/pull/*",
+    "https://*/*/blob/*",
+    "https://*/graphql",
+    "https://*/api/graphql",
+    "https://*/api/v3/*",
+    "http://*/*/pull/*",
+    "http://*/*/blob/*",
+    "http://*/graphql",
+    "http://*/api/graphql",
+    "http://*/api/v3/*"
   ],
   "content_scripts": [
     {

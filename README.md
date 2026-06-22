@@ -44,7 +44,8 @@ Markdown ファイルを PR で見やすくし、`GitHub` と `GitHub Enterprise
 
 - `manifest.json`: extension manifest
 - `content.js`: PR detection, route-data fetch, line mapping, thread rendering, and comment posting
-- `page-bridge.js`: page-context same-origin fetch bridge
+- `page-bridge.js`: same-origin only page-context fetch bridge for GitHub internal `page_data` and rich diff sources
+- `background.js`: allowlist-enforced fallback proxy for restricted GitHub / GHE requests
 - `styles.css`: injected modern UI styles with light/dark support
 - `popup.html`, `popup.css`: compact extension info panel
 - `docs/design.md`: master design document
@@ -53,7 +54,7 @@ Markdown ファイルを PR で見やすくし、`GitHub` と `GitHub Enterprise
 
 ## Privacy
 
-The extension only sends requests to the same GitHub or GitHub Enterprise origin currently open in the browser. It does not use external APIs, remote storage, analytics, or telemetry.
+The extension only sends requests to the same GitHub or GitHub Enterprise origin currently open in the browser. It does not use external APIs, remote storage, analytics, or telemetry. Internal `page_data` operations are executed through a same-origin page bridge with an explicit path allowlist.
 
 ## License
 
